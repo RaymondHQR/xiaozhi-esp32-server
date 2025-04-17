@@ -116,6 +116,27 @@ class ConnectionHandler:
         try:
             # 获取并验证headers
             self.headers = dict(ws.request.headers)
+
+            if self.headers.get("device-id", None) is None:
+                # 尝试从 URL 的查询参数中获取 device-id
+                from urllib.parse import parse_qs, urlparse
+
+                # 从 WebSocket 请求中获取路径
+                request_path = ws.request.path
+                if not request_path:
+                    self.logger.bind(tag=TAG).error("无法获取请求路径")
+                    return
+                parsed_url = urlparse(request_path)
+                query_params = parse_qs(parsed_url.query)
+                if "device-id" in query_params:
+                    self.headers["device-id"] = query_params["device-id"][0]
+                    self.headers["client-id"] = query_params["client-id"][0]
+                else:
+                    self.logger.bind(tag=TAG).error(
+                        "无法从请求头和URL查询参数中获取device-id"
+                    )
+                    return
+
             # 获取客户端ip地址
             self.client_ip = ws.remote_address[0]
             self.logger.bind(tag=TAG).info(
@@ -184,7 +205,6 @@ class ConnectionHandler:
         self._initialize_models()
 
         """加载提示词"""
-        self.prompt = self.config["prompt"]
         self.dialogue.put(Message(role="system", content=self.prompt))
 
         """加载记忆"""
@@ -477,16 +497,19 @@ class ConnectionHandler:
         function_id = None
         function_arguments = ""
         content_arguments = ""
+ 
         for response in llm_responses:
             content, tools_call = response
+
             if "content" in response:
                 content = response["content"]
                 tools_call = None
             if content is not None and len(content) > 0:
-                if len(response_message) <= 0 and (
-                    content == "```" or "<tool_call>" in content
-                ):
-                    tool_call_flag = True
+                content_arguments += content
+          
+            if not tool_call_flag and content_arguments.startswith("<tool_call>"):
+                # print("content_arguments", content_arguments)
+                tool_call_flag = True
 
             if tools_call is not None:
                 tool_call_flag = True
@@ -498,9 +521,7 @@ class ConnectionHandler:
                     function_arguments += tools_call[0].function.arguments
 
             if content is not None and len(content) > 0:
-                if tool_call_flag:
-                    content_arguments += content
-                else:
+                if not tool_call_flag:
                     response_message.append(content)
 
                     if self.client_abort:
@@ -561,9 +582,8 @@ class ConnectionHandler:
                     self.logger.bind(tag=TAG).error(
                         f"function call error: {content_arguments}"
                     )
-                else:
-                    function_arguments = json.loads(function_arguments)
             if not bHasError:
+                response_message.clear()
                 self.logger.bind(tag=TAG).info(
                     f"function_name={function_name}, function_id={function_id}, function_arguments={function_arguments}"
                 )
